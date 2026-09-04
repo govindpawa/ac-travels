@@ -1,6 +1,6 @@
-# AC Tours and Travels Website
+# KP Travels Website
 
-A simple, responsive website for AC Tours and Travels.
+A simple, responsive website for KP Travels Solutions Pvt. Ltd.
 
 ## Quick Start
 
