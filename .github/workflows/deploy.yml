@@ -1,0 +1,84 @@
+name: Deploy kptravel.in
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'index.html'
+      - 'style.css'
+      - 'script.js'
+      - 'images/**'
+      - '.github/workflows/deploy.yml'
+  workflow_dispatch:
+
+# Authenticates to AWS via GitHub OIDC (role: kptravel-deploy) — no stored keys.
+permissions:
+  id-token: write
+  contents: read
+
+concurrency:
+  group: deploy-kptravel
+  cancel-in-progress: true
+
+env:
+  AWS_REGION: ap-south-1
+  BUCKET: kptravel.in
+  ROLE_ARN: arn:aws:iam::661842320634:role/kptravel-deploy
+
+jobs:
+  deploy:
+    name: Sync to S3 and invalidate CDN
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the site
+        uses: actions/checkout@v4
+
+      - name: Assume the deploy role
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      # Fingerprinted assets are safe to cache for a year; index.html must not be,
+      # or visitors keep the old page after a deploy.
+      - name: Upload assets (long cache)
+        run: |
+          aws s3 sync . "s3://$BUCKET/" \
+            --exclude "*" \
+            --include "style.css" \
+            --include "script.js" \
+            --include "images/*" \
+            --exclude "*.DS_Store" \
+            --cache-control "public,max-age=31536000,immutable" \
+            --delete
+
+      - name: Upload index.html (no cache)
+        run: |
+          aws s3 cp index.html "s3://$BUCKET/index.html" \
+            --cache-control "public,max-age=0,must-revalidate" \
+            --content-type "text/html; charset=utf-8"
+
+      # The distribution only exists once finish-cdn.sh has run, so skip
+      # invalidation rather than failing the deploy before then.
+      - name: Invalidate CloudFront
+        run: |
+          DIST_ID=$(aws cloudfront list-distributions \
+            --query "DistributionList.Items[?contains(Aliases.Items, 'kptravel.in')].Id | [0]" \
+            --output text)
+          if [ -z "$DIST_ID" ] || [ "$DIST_ID" = "None" ]; then
+            echo "No CloudFront distribution for kptravel.in yet — skipping invalidation."
+            echo "Run deploy/finish-cdn.sh once the ACM certificate is issued."
+            exit 0
+          fi
+          echo "Invalidating $DIST_ID"
+          aws cloudfront create-invalidation \
+            --distribution-id "$DIST_ID" \
+            --paths "/" "/index.html" "/style.css" "/script.js" \
+            --query 'Invalidation.Id' --output text
+
+      - name: Summary
+        run: |
+          echo "### Deployed kptravel.in" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Bucket: \`s3://$BUCKET\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Commit: \`${GITHUB_SHA::7}\`" >> "$GITHUB_STEP_SUMMARY"
